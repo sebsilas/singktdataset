@@ -1,0 +1,37 @@
+
+
+```{r}
+
+library(tidyverse)
+
+```
+
+
+```{r}
+
+sing_dat <- read_csv('recordDS.csv') %>%
+  rowwise() %>% 
+  mutate(qa_array = list( rjson::fromJSON(qa_array) ),
+         qa_array = list ( tibble::tibble(
+           question_id = qa_array[[1]],
+           correct = qa_array[[2]]
+         ))) %>% 
+  ungroup() %>% 
+  unnest_longer(qa_array) %>% 
+  unnest_wider(qa_array) %>% 
+  mutate(user_id = as.factor(user_id),
+         opern_id = as.factor(opern_id),
+         record_id = as.factor(record_id),
+         create_time = lubridate::as_datetime(as.POSIXct(create_time, format="%Y/%m/%d %H:%M")),
+         date_numeric = scales::rescale(as.numeric(create_time)),
+         question_id = as.factor(question_id),
+         correct = as.factor(correct)
+         )
+
+use_data(sing_dat, overwrite = TRUE)
+
+```
+
+
+
+

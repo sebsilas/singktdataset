@@ -1,0 +1,244 @@
+
+
+```{r}
+
+library(tidyverse)
+library(lme4)
+library(MuMIn)
+
+set.seed(123)
+
+```
+
+
+```{r}
+
+
+DA_mod <- glmer(correct ~ date_numeric + (1|user_id) + (1|question_id),
+                family = "binomial", 
+                data = sing_dat)
+
+```
+
+```{r}
+
+use_data(DA_mod)
+
+```
+
+
+```{r}
+
+summary(DA_mod)
+
+```
+
+```{r}
+
+MuMIn::r.squaredGLMM(DA_mod)
+
+```
+
+
+```{r}
+
+ranefs <- ranef(DA_mod)
+
+```
+
+
+```{r}
+
+question_ranefs <- ranefs$question_id
+user_ranefs <- ranefs$user_id
+
+```
+
+
+```{r}
+
+hist(user_ranefs$`(Intercept)`)
+
+hist(question_ranefs$`(Intercept)`)
+
+```
+
+
+# Feature engineering based on musicassessrdb::get_study_history_stats
+
+```{r}
+
+user_question_id_counts <- sing_dat %>% count(user_id, question_id)
+
+```
+
+
+```{r}
+
+hist(user_question_id_counts$n)
+
+```
+
+
+Note, participants only do questions once per record_id (there is no "multiple attempts") per session.
+
+```{r, eval = FALSE}
+
+compute_trial_stats <- function(user_id,
+                                opern_id,
+                                record_id,
+                                create_time,
+                                question_id,
+                                correct, 
+                                date_numeric,
+                                id) {
+  
+  
+  
+  if (id %% 1000 == 0) {
+    pr <- round((id/1081876)*100, 2)
+   logging::loginfo("Progress: %s", pr)
+  }
+  
+  
+  
+  #tictoc::tic("2")
+  
+  #browser()
+  
+  # Get trials up to the current ID
+  trials_current <- sing_dat %>%
+    dplyr::filter(user_id == !! user_id,
+                  question_id == !! question_id,
+                  date_numeric < !! date_numeric)
+
+
+  # Number of times practised
+  no_times_practised <- nrow(trials_current)
+  
+  # Number of times correct in previous learning history
+  no_times_correct <- sum(trials_current$correct)
+  
+  # Proportion of times correct
+  proportion_of_times_correct <- no_times_correct/no_times_practised
+  
+  last_two_trials <- trials_current %>% 
+    slice_max(tibble(date_numeric, record_id), n = 2)
+    
+  
+  if(nrow(last_two_trials) < 1L) {
+    
+    learned_in_previous_session <- NA
+    correct_two_trials_ago <- NA
+    correct_one_trial_ago <- NA
+    time_since_last_practice <- NA
+    
+  } else if(nrow(last_two_trials) == 1L) {
+    
+    learned_in_previous_session <- NA
+    correct_two_trials_ago <- NA
+    last_trial <- last_two_trials[1, ]
+    correct_one_trial_ago <- as.integer(last_trial["correct"])
+    time_since_last_practice <- date_numeric - last_trial$date_numeric
+    
+  } else if(nrow(last_two_trials) == 2L) {
+    
+    correct_two_trials_ago <- as.integer(last_two_trials[1, "correct"])
+    last_trial <- last_two_trials[2, ]
+    correct_one_trial_ago <- as.integer(last_trial["correct"])
+    time_since_last_practice <- date_numeric - last_trial$date_numeric
+    
+    if(is.na(correct_two_trials_ago) || is.na(correct_one_trial_ago)) {
+      learned_in_previous_session <- 1
+    } else if(correct_two_trials_ago == 0 && correct_one_trial_ago == 1) {
+      learned_in_previous_session <- 1
+    } else {
+      learned_in_previous_session <- 0
+    }
+    
+  } else {
+    stop("Hm?")
+  }
+  
+  list(
+    id = id,
+    no_times_correct = no_times_correct,
+    proportion_of_times_correct = if(is.nan(proportion_of_times_correct)) NA else proportion_of_times_correct,
+    no_times_practised = no_times_practised,
+    correct_last_trial = if(length(correct_one_trial_ago) == 0) NA else correct_one_trial_ago,
+    time_since_last_practice = if(length(time_since_last_practice) == 0) NA else time_since_last_practice,
+    learned_in_previous_session = learned_in_previous_session
+  )
+    
+}
+    
+
+sing_dat <- sing_dat %>%
+  mutate(id = row_number(),
+         correct = as.integer(as.character(correct)))
+
+```
+
+
+
+
+
+
+
+
+```{r}
+
+# Started 21.46, 19 August 2024
+# Finished 19.33, 20 August 2024
+
+sing_dat_stats <- sing_dat %>% 
+  pmap(compute_trial_stats) %>% 
+  bind_rows()
+  
+
+use_data(sing_dat_stats, overwrite = TRUE)
+
+```
+
+
+```{r}
+
+sing_dat_with_item_stats <- sing_dat %>% 
+  left_join(sing_dat_stats, by = "id")
+
+
+use_data(sing_dat_with_item_stats, overwrite = TRUE)
+
+```
+
+
+
+
+
+```{r}
+
+
+DA_mod_2 <- glmer(correct ~ no_times_correct +
+    proportion_of_times_correct + no_times_practised + correct_last_trial + time_since_last_practice,
+    learned_in_previous_session + date_numeric + (1|user_id) + (1|question_id),
+                family = "binomial", 
+                data = sing_dat_with_item_stats)
+
+
+use_data(DA_mod_2)
+
+```
+
+
+```{r}
+
+summary(DA_mod_2)
+
+```
+
+```{r}
+
+MuMIn::r.squaredGLMM(DA_mod_2)
+
+```
+
