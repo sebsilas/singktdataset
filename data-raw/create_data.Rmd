@@ -34,4 +34,48 @@ use_data(sing_dat, overwrite = TRUE)
 
 
 
+```{r}
+
+sing_dat_agg <- sing_dat %>% 
+  group_by(opern_id, record_id, date_numeric, user_id) %>% 
+  summarise(no_correct_notes = sum(as.numeric(as.character(correct))),
+            no_notes = n(),
+            proportion_correct_notes = no_correct_notes/no_notes) %>% 
+  ungroup() %>% 
+  rename(item_id = opern_id)
+
+use_data(sing_dat_agg, overwrite = TRUE)
+
+
+```
+
+
+```{r}
+
+sing_dat %>% 
+  count(correct)
+
+```
+
+
+```{r}
+
+hist(sing_dat_agg$no_correct_notes)
+
+```
+
+```{r}
+
+hist(sing_dat_agg$no_notes)
+
+```
+
+```{r}
+
+hist(sing_dat_agg$proportion_correct_notes)
+
+```
+
+
+
 

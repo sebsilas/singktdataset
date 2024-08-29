@@ -1,28 +1,56 @@
 
 
+
 ```{r}
 
 library(tidyverse)
 library(lme4)
 library(MuMIn)
+library(tidymodels)
+library(gpboost)
+library(glmmLasso)
+library(desirability2)
+
+
+
+load_all()
 
 set.seed(123)
 
-```
-
-
-```{r}
-
-
-DA_mod <- glmer(correct ~ date_numeric + (1|user_id) + (1|question_id),
-                family = "binomial", 
-                data = sing_dat)
+theme_set(theme_minimal())
 
 ```
 
 ```{r}
+# Function to compute R-squared
+compute_r_squared <- function(actual, predicted) {
+  # Calculate the residual sum of squares
+  ss_res <- sum((actual - predicted) ^ 2)
+  
+  # Calculate the total sum of squares
+  ss_tot <- sum((actual - mean(actual)) ^ 2)
+  
+  # Compute R-squared
+  r_squared <- 1 - (ss_res / ss_tot)
+  
+  return(r_squared)
+}
 
-use_data(DA_mod)
+```
+
+```{r}
+
+
+DA_mod <- lmer(proportion_correct_notes ~ date_numeric + (1|user_id) + (1|item_id) + (1|user_id:item_id),
+                data = sing_dat_agg)
+
+```
+
+
+
+```{r}
+
+use_data(DA_mod, overwrite = TRUE)
 
 ```
 
@@ -49,7 +77,7 @@ ranefs <- ranef(DA_mod)
 
 ```{r}
 
-question_ranefs <- ranefs$question_id
+question_ranefs <- ranefs$item_id
 user_ranefs <- ranefs$user_id
 
 ```
@@ -64,88 +92,109 @@ hist(question_ranefs$`(Intercept)`)
 ```
 
 
+Check there are no users with all 1s or items with all 1s
+
+```{r}
+
+item_agg <- 
+  sing_dat_agg %>% 
+    group_by(item_id) %>% 
+    summarise(proportion_correct_notes = mean(proportion_correct_notes, na.rm = TRUE)) %>% 
+    ungroup() %>% 
+    arrange(desc(proportion_correct_notes))
+
+hist(item_agg$proportion_correct_notes)
+
+```
+
+```{r}
+
+user_agg <- 
+  sing_dat_agg %>% 
+    group_by(user_id) %>% 
+    summarise(proportion_correct_notes = mean(proportion_correct_notes, na.rm = TRUE)) %>% 
+    ungroup() %>% 
+    arrange(desc(proportion_correct_notes))
+
+hist(user_agg$proportion_correct_notes)
+
+```
+
+
 # Feature engineering based on musicassessrdb::get_study_history_stats
-
-```{r}
-
-user_question_id_counts <- sing_dat %>% count(user_id, question_id)
-
-```
-
-
-```{r}
-
-hist(user_question_id_counts$n)
-
-```
 
 
 Note, participants only do questions once per record_id (there is no "multiple attempts") per session.
 
-```{r, eval = FALSE}
+```{r}
 
-compute_trial_stats <- function(user_id,
-                                opern_id,
+compute_trial_stats <- function(item_id,
                                 record_id,
-                                create_time,
-                                question_id,
-                                correct, 
                                 date_numeric,
+                                user_id, 
+                                no_correct_notes,
+                                no_notes,
+                                proportion_correct_notes,
                                 id) {
   
   
-  
+  # This id is only for progress purposes and will be delete straight after
   if (id %% 1000 == 0) {
-    pr <- round((id/1081876)*100, 2)
+    pr <- round((id/nrow(sing_dat_agg))*100, 2)
    logging::loginfo("Progress: %s", pr)
   }
   
-  
-  
-  #tictoc::tic("2")
-  
-  #browser()
+
   
   # Get trials up to the current ID
-  trials_current <- sing_dat %>%
+  trials_current <- sing_dat_agg %>%
     dplyr::filter(user_id == !! user_id,
-                  question_id == !! question_id,
+                  item_id == !! item_id,
                   date_numeric < !! date_numeric)
 
 
   # Number of times practised
   no_times_practised <- nrow(trials_current)
   
-  # Number of times correct in previous learning history
-  no_times_correct <- sum(trials_current$correct)
   
-  # Proportion of times correct
-  proportion_of_times_correct <- no_times_correct/no_times_practised
+  # Number of times correct in previous learning history
+  avg_score <- mean(trials_current$proportion_correct_notes, na.rm = TRUE)
   
   last_two_trials <- trials_current %>% 
-    slice_max(tibble(date_numeric, record_id), n = 2)
+    slice_max(tibble(date_numeric, record_id), n = 2) %>% 
+    arrange(record_id) # The order flips when you do slice_max
     
   
   if(nrow(last_two_trials) < 1L) {
     
     learned_in_previous_session <- NA
-    correct_two_trials_ago <- NA
+    score_two_trials_ago <- NA
+    correct_two_trials_ago <- 
+    score_one_trial_ago <- NA
     correct_one_trial_ago <- NA
     time_since_last_practice <- NA
     
   } else if(nrow(last_two_trials) == 1L) {
     
     learned_in_previous_session <- NA
+    score_two_trials_ago <- NA
     correct_two_trials_ago <- NA
+    
     last_trial <- last_two_trials[1, ]
-    correct_one_trial_ago <- as.integer(last_trial["correct"])
+    score_one_trial_ago <- last_trial %>% dplyr::pull(proportion_correct_notes)
+    correct_one_trial_ago <- near(score_one_trial_ago, 1)
     time_since_last_practice <- date_numeric - last_trial$date_numeric
     
   } else if(nrow(last_two_trials) == 2L) {
     
-    correct_two_trials_ago <- as.integer(last_two_trials[1, "correct"])
+    score_two_trials_ago <- last_two_trials[[1, "proportion_correct_notes"]]
+    correct_two_trials_ago <- near(score_two_trials_ago, 1)
+    
     last_trial <- last_two_trials[2, ]
-    correct_one_trial_ago <- as.integer(last_trial["correct"])
+    
+    score_one_trial_ago <- last_trial %>% dplyr::pull(proportion_correct_notes)
+    correct_one_trial_ago <- near(score_one_trial_ago, 1)
+    
     time_since_last_practice <- date_numeric - last_trial$date_numeric
     
     if(is.na(correct_two_trials_ago) || is.na(correct_one_trial_ago)) {
@@ -159,23 +208,25 @@ compute_trial_stats <- function(user_id,
   } else {
     stop("Hm?")
   }
+
   
   list(
     id = id,
-    no_times_correct = no_times_correct,
-    proportion_of_times_correct = if(is.nan(proportion_of_times_correct)) NA else proportion_of_times_correct,
+    avg_score = if(is.nan(avg_score)) NA else avg_score,
     no_times_practised = no_times_practised,
-    correct_last_trial = if(length(correct_one_trial_ago) == 0) NA else correct_one_trial_ago,
-    time_since_last_practice = if(length(time_since_last_practice) == 0) NA else time_since_last_practice,
+    score_two_trials_ago  = score_two_trials_ago,
+    correct_two_trials_ago = correct_two_trials_ago,
+    score_one_trial_ago = score_one_trial_ago,
+    correct_one_trial_ago = correct_one_trial_ago,
+    time_since_last_practice = time_since_last_practice,
     learned_in_previous_session = learned_in_previous_session
   )
     
 }
     
 
-sing_dat <- sing_dat %>%
-  mutate(id = row_number(),
-         correct = as.integer(as.character(correct)))
+sing_dat_agg <- sing_dat_agg %>%
+  mutate(id = row_number())
 
 ```
 
@@ -186,15 +237,14 @@ sing_dat <- sing_dat %>%
 
 
 
-```{r}
+```{r, eval = FALSE}
 
-# Started 21.46, 19 August 2024
-# Finished 19.33, 20 August 2024
+# Started 17.03, 27 August 2024
+# Finished  17.06 Very quick now!
 
-sing_dat_stats <- sing_dat %>% 
+sing_dat_stats <- sing_dat_agg %>% 
   pmap(compute_trial_stats) %>% 
   bind_rows()
-  
 
 use_data(sing_dat_stats, overwrite = TRUE)
 
@@ -203,8 +253,23 @@ use_data(sing_dat_stats, overwrite = TRUE)
 
 ```{r}
 
-sing_dat_with_item_stats <- sing_dat %>% 
-  left_join(sing_dat_stats, by = "id")
+sing_dat_stats %>% 
+  pivot_longer(-id, names_to = "Variable", values_to = "Value") %>% 
+    ggplot(aes(x = Value)) +
+      geom_histogram() +
+      facet_wrap(~Variable, scales = "free_x")
+
+```
+
+
+```{r}
+
+sing_dat_with_item_stats <- sing_dat_agg %>% 
+  left_join(sing_dat_stats, by = "id") %>% 
+  select(-id) %>% 
+  mutate(correct_one_trial_ago = as.factor(correct_one_trial_ago),
+         correct_two_trials_ago = as.factor(correct_two_trials_ago)
+         )
 
 
 use_data(sing_dat_with_item_stats, overwrite = TRUE)
@@ -217,17 +282,40 @@ use_data(sing_dat_with_item_stats, overwrite = TRUE)
 
 ```{r}
 
+# Put 3/4 of the data into the training set 
+data_split <- initial_split(sing_dat_with_item_stats, prop = 3/4)
 
-DA_mod_2 <- glmer(correct ~ no_times_correct +
-    proportion_of_times_correct + no_times_practised + correct_last_trial + time_since_last_practice,
-    learned_in_previous_session + date_numeric + (1|user_id) + (1|question_id),
-                family = "binomial", 
-                data = sing_dat_with_item_stats)
-
-
-use_data(DA_mod_2)
+# Create dataframes for the two sets:
+train_data <- training(data_split) 
+test_data <- testing(data_split)
 
 ```
+
+
+```{r}
+
+
+DA_mod_2 <-
+    lmerTest::lmer(proportion_correct_notes ~ 
+                     log(no_notes) + 
+                     avg_score +
+   no_times_practised +
+    score_two_trials_ago +
+    correct_two_trials_ago +
+    score_one_trial_ago +
+    correct_one_trial_ago +
+    time_since_last_practice +
+    learned_in_previous_session + 
+     time_since_last_practice * score_one_trial_ago +
+      (1|user_id) + 
+      (1|item_id) + 
+      (1|user_id:item_id), data = train_data) 
+
+
+use_data(DA_mod_2, overwrite = TRUE)
+
+```
+
 
 
 ```{r}
@@ -241,4 +329,785 @@ summary(DA_mod_2)
 MuMIn::r.squaredGLMM(DA_mod_2)
 
 ```
+
+
+
+```{r}
+
+caic_res <- cAIC4::stepcAIC(DA_mod_2, 
+                            direction = "both",
+                            # groupCandidates = c("user_id",
+                            #                     "item_id",
+                            #                     "user_id:item_id"),
+                            fixEfCandidates = c("log(no_notes)", "avg_score", "no_times_practised", "score_two_trials_ago", "correct_two_trials_ago", "score_one_trial_ago", "correct_one_trial_ago", "time_since_last_practice", "learned_in_previous_session", "score_one_trial_ago:time_since_last_practice"),
+                            trace = TRUE)
+
+use_data(caic_res)
+
+caic_res$finalModel
+
+```
+
+```{r}
+
+caic_res$finalModel
+
+```
+
+
+
+```{r}
+
+caic_res$bestCAIC
+
+
+```
+
+
+```{r}
+
+DA_mod_2.2 <-
+    lmerTest::lmer(proportion_correct_notes ~ 
+   no_times_practised +
+      (1|user_id) + 
+      (1|item_id) + 
+      (1|user_id:item_id), data = train_data) 
+
+
+use_data(DA_mod_2.2, overwrite = TRUE)
+
+```
+
+
+
+```{r}
+
+summary(DA_mod_2.2)
+
+```
+
+
+```{r}
+
+MuMIn::r.squaredGLMM(DA_mod_2.2)
+
+```
+
+This doesn't seem to be a good approac. Turns out, it maximises for the random effects, but we want to maximise for the fixed effects.
+
+We turn to glmm lasso for this instead:
+
+
+```{r}
+
+# https://rdrr.io/cran/glmmLasso/src/demo/glmmLasso-soccer.r
+
+```
+
+```{r}
+
+## generalized additive mixed model
+## grid for the smoothing parameter
+
+lambda <- seq(500, 0, by =-5)
+
+################## First Simple Method ############################################
+## Using BIC (or AIC, respectively) to determine the optimal tuning parameter lambda
+
+BIC_vec <- rep(Inf,length(lambda))
+
+## First fit good starting model
+
+library(MASS)
+library(nlme)
+
+PQL <- glmmPQL(proportion_correct_notes ~ 1, 
+   random = list(item_id = ~ 1, user_id = ~ 1, user_id_item_id = ~ 1),
+               family = gaussian, 
+               data = sing_dat_with_item_stats %>% 
+                 mutate(user_id_item_id = interaction(user_id, item_id))
+               )
+
+```
+
+
+```{r}
+
+Delta.start <- c(
+                as.numeric(PQL$coef$fixed), # The intercept
+                 rep(0,10), # 10 fixed effects
+                 as.numeric(t( # random effects:
+                   c(
+                   PQL$coef$random$item_id,
+                   PQL$coef$random$user_id,
+                   PQL$coef$random$user_id_item_id
+                   )
+                   )))
+
+Q.start <- as.numeric(c(VarCorr(PQL)[2,1], VarCorr(PQL)[4,1], VarCorr(PQL)[6,1]))
+
+for(j in 1:length(lambda)) {
+  
+  print(paste("Iteration ", j,sep=""))
+    
+  glm1 <- try(glmmLasso(proportion_correct_notes ~ 
+                     log_no_notes +
+                     avg_score +
+                     no_times_practised +
+                      score_two_trials_ago +
+                      as.factor(correct_two_trials_ago) +
+                      score_one_trial_ago +
+                      as.factor(correct_one_trial_ago) +
+                      time_since_last_practice +
+                      learned_in_previous_session + 
+                       time_since_last_practice_by_score_one_trial_ago, 
+          rnd = list(item_id = ~ 1, 
+                     user_id = ~ 1, 
+                     user_id_item_id = ~ 1),  
+          family = gaussian(link="identity"), 
+          data = sing_dat_with_item_stats %>% 
+            mutate(user_id_item_id = interaction(user_id, item_id),
+                   log_no_notes = log(no_notes),
+                   time_since_last_practice_by_score_one_trial_ago = time_since_last_practice * score_one_trial_ago) %>% na.omit, 
+          lambda = lambda[j],
+          switch.NR = FALSE,
+          final.re = FALSE,
+          control = list(start = Delta.start,
+                         q_start = Q.start)), silent = TRUE)  
+  
+  if(inherits(glm1, "try-error")) {  
+    print(as.character(glm1))
+  } else {
+    BIC_vec[j] < -glm1$bic
+  }
+          
+}
+
+use_data(BIC_vec)
+
+```
+
+
+```{r}
+opt <- which.min(BIC_vec)
+
+```
+
+
+```{r}
+        
+glm1_final <- glmmLasso(points~transfer.spendings  
+        + ave.unfair.score + ball.possession
+        + tackles + ave.attend + sold.out, rnd = list(team=~1),  
+        family = family, data = soccer, lambda=lambda[opt],switch.NR=FALSE,final.re=FALSE,
+        control=list(start=Delta.start,q_start=Q.start))
+         
+  
+        
+summary(glm1_final)
+
+```
+
+
+
+# Manual BIC search
+
+```{r}
+
+fixed_effects <- c("log(no_notes)", "avg_score", "no_times_practised", "score_two_trials_ago", "correct_two_trials_ago", "score_one_trial_ago", "correct_one_trial_ago", "time_since_last_practice", "learned_in_previous_session", "score_one_trial_ago*time_since_last_practice")
+
+ranfx_frm <-  ' + (1|user_id) + (1|item_id) + (1|user_id:item_id)'
+
+mod_tab <- map(1:length(fixed_effects), function(no_vars) {
+  combn(fixed_effects, m = no_vars, simplify = FALSE)
+}) %>% unlist(recursive = FALSE) %>% 
+  map_dfr(function(terms) {
+    frm <- paste0("proportion_correct_notes ~ ", paste0(terms, collapse = " + "), ranfx_frm)
+    tibble::tibble(frm = frm)
+  }) %>% 
+  dplyr::rowwise() %>% 
+  dplyr::mutate(model = list( lmerTest::lmer(as.formula(frm), data = train_data) ),
+         BIC = BIC(model)) %>% 
+  dplyr::ungroup()
+
+use_data(mod_tab)
+
+```
+
+
+```{r}
+
+mod_tab %>% 
+  slice_min(BIC)
+
+```
+
+
+```{r}
+
+mod_tab %>% 
+  pull(BIC) %>% 
+  hist()
+
+```
+
+```{r}
+
+load('../mod_tab.rda')
+
+```
+
+```{r}
+
+mod_tab <- mod_tab %>% 
+  rowwise() %>% 
+  mutate(r2m = as.numeric(MuMIn::r.squaredGLMM(model)[, "R2m"])) %>% 
+  ungroup()
+
+save(mod_tab, file = 'mod_tab.rda')
+
+mod_tab2 <- mod_tab %>% 
+  select(frm, BIC, r2m)
+
+rm(mod_tab)
+
+gc()
+
+```
+
+
+```{r}
+
+mod_tab2 <- mod_tab2 %>% 
+  rowwise() %>% 
+  mutate(num_features = length(strsplit(frm, split = "+", fixed = TRUE)[[1]]) - 3 ) %>% 
+  ungroup()
+
+```
+
+```{r}
+
+mod_tab2 %>% 
+  ggplot(aes(BIC, r2m, col = num_features)) + 
+    geom_point(alpha = 1/2, size = 0.2)
+
+```
+
+
+```{r}
+
+des_res <- 
+  mod_tab2 %>% 
+    mutate(
+      r2m_d   = d_max(r2m, high = 1, low = 0),
+      BIC_d  = d_min(BIC, low = min(mod_tab2$BIC), high = max(mod_tab2$BIC)),
+      num_features_d = d_min(num_features, low = 0, high = 10, scale = 2),
+      overall = d_overall(r2m_d, BIC_d, num_features_d)) %>% 
+    slice_max(overall, n = 1)
+
+
+use_data(des_res, overwrite = TRUE)
+
+```
+
+
+
+# Check it on the test
+
+
+```{r}
+
+min_model_test_fit <- lmerTest::lmer(proportion_correct_notes ~ 
+                          avg_score + (1|user_id) + (1|item_id) + (1|user_id:item_id), data = test_data)
+
+```
+
+
+```{r}
+
+MuMIn::r.squaredGLMM(min_model_test_fit)
+
+```
+
+
+# Gradient-boosed trees
+
+```{r}
+
+
+xgb_model<- parsnip::boost_tree() %>%
+  parsnip::set_engine("xgboost") %>%
+  parsnip::set_mode("regression")
+
+
+rec <-  
+  recipes::recipe(proportion_correct_notes ~ avg_score +
+                    no_notes + 
+                    no_times_practised +
+                    score_two_trials_ago +
+                    correct_two_trials_ago +
+                    score_one_trial_ago +
+                    correct_one_trial_ago +
+                    time_since_last_practice +
+    learned_in_previous_session, 
+    data = sing_dat_with_item_stats) %>%
+    recipes::step_scale( recipes::all_numeric_predictors() ) %>%
+    recipes::step_dummy( recipes::all_nominal_predictors() ) %>% 
+    recipes::step_corr(threshold = 0.7) %>% 
+    recipes::step_normalize(recipes::all_numeric_predictors())
+
+
+wf <- workflows::workflow() %>% 
+    workflows::add_model(xgb_model) %>%
+    workflows::add_recipe(rec)
+
+
+
+```
+
+
+```{r}
+
+sing_dat_with_item_stats %>% 
+  select(where(is.numeric)) %>% 
+  cor(use = 'pairwise.complete.obs')
+  
+
+```
+
+
+
+
+```{r}
+
+xgb_fit <- parsnip::fit(wf, data = train_data)
+
+```
+
+
+```{r}
+  
+predictions <- xgb_fit %>% 
+  predict(test_data) %>% 
+  bind_cols(test_data)
+  
+# Evaluate the model
+xgb_metrics <- 
+  predictions %>% 
+  metrics(truth = proportion_correct_notes, estimate = .pred) %>% 
+  pivot_wider(names_from = .metric, values_from = .estimate) %>% 
+  select(-`.estimator`)
+
+
+```
+
+
+```{r}
+
+xgb_metrics
+
+```
+
+The test rsq is okay
+
+```{r}
+
+vip::vip(xgb_fit)
+
+```
+
+
+
+
+
+
+Add item and user as factors
+
+
+
+```{r}
+
+
+rec2 <-  
+ recipes::recipe(proportion_correct_notes ~ avg_score +
+                   no_notes + 
+    no_times_practised +
+    score_two_trials_ago +
+    correct_two_trials_ago +
+    score_one_trial_ago +
+    correct_one_trial_ago +
+    time_since_last_practice +
+    learned_in_previous_session + item_id + user_id, 
+                       data = sing_dat_with_item_stats) %>%
+    recipes::step_scale( recipes::all_numeric_predictors() ) %>%
+    recipes::step_dummy( recipes::all_nominal_predictors() ) %>% 
+    recipes::step_corr(threshold = 0.7) %>% 
+    recipes::step_normalize(recipes::all_numeric_predictors())
+
+
+wf2 <- workflows::workflow() %>% 
+    workflows::add_model(xgb_model) %>%
+    workflows::add_recipe(rec2)
+
+
+
+```
+
+
+
+```{r}
+
+
+xgb_fit2 <- parsnip::fit(wf2, data = train_data)
+
+use_data(xgb_fit2, overwrite = TRUE)
+
+```
+
+
+```{r}
+  
+predictions2 <- xgb_fit2 %>% 
+  predict(test_data) %>% 
+  bind_cols(test_data)
+  
+# Evaluate the model
+xgb_metrics2 <- 
+  predictions2 %>% 
+  metrics(truth = proportion_correct_notes, estimate = .pred) %>% 
+  pivot_wider(names_from = .metric, values_from = .estimate) %>% 
+  select(-`.estimator`)
+
+
+use_data(predictions2, xgb_metrics2, overwrite = TRUE)
+
+```
+
+
+```{r}
+
+xgb_metrics2
+
+```
+
+The test R-squared improves a bit (although still small)
+
+
+```{r}
+
+vip::vip(xgb_fit2)
+
+```
+
+
+
+
+
+
+
+gpboost
+
+See: https://github.com/fabsig/GPBoost/blob/master/R-package/demo/GPBoost_algorithm.R
+
+
+```{r}
+
+group <- train_data %>% 
+  select(user_id, item_id) %>% 
+  mutate(user_id_item_id = interaction(user_id, item_id)) %>% 
+  as.matrix()
+
+
+X <- train_data %>% 
+  select(avg_score,
+         no_notes,
+    no_times_practised,
+    score_two_trials_ago,
+    correct_two_trials_ago,
+    score_one_trial_ago,
+    correct_one_trial_ago,
+    time_since_last_practice,
+    learned_in_previous_session ) %>% 
+  as.matrix()
+
+
+y <- train_data %>% 
+  select(proportion_correct_notes) %>% 
+  as.matrix()
+
+#--------------------Training----------------
+# Define random effects model
+gp_model <- GPModel(group_data = group, likelihood = "gaussian")
+# The default optimizer for covariance parameters (hyperparameters) is 
+# Nesterov-accelerated gradient descent.
+# This can be changed to, e.g., Nelder-Mead as follows:
+# set_optim_params(gp_model, params=list(optimizer_cov="nelder_mead"))
+# Use the option trace=TRUE to monitor convergence of hyperparameter estimation of the gp_model. E.g.:
+# set_optim_params(gp_model, params=list(trace=TRUE))
+
+# Specify boosting parameters
+# Note: these parameters are by no means optimal for all data sets but 
+#       need to be chosen appropriately, e.g., using 'gpb.grid.search.tune.parameters'
+
+
+params <- list(learning_rate = 0.01, 
+               max_depth = 3, 
+               num_leaves = 2^10)
+
+bst <- gpboost(data = X, 
+               label = y, 
+               gp_model = gp_model, 
+               nrounds = 50, 
+               params = params, verbose = 0)
+
+summary(gp_model) # Estimated random effects model
+
+
+use_data(gp_model, overwrite = TRUE)
+
+
+```
+
+
+```{r}
+
+#--------------------Prediction----------------
+
+group_test <- test_data  %>% 
+  select(user_id, item_id) %>% 
+    mutate(user_id_item_id = interaction(user_id, item_id)) %>% 
+  as.matrix()
+
+
+Xtest <- test_data %>% 
+  select(avg_score,
+         no_notes,
+    no_times_practised,
+    score_two_trials_ago,
+    correct_two_trials_ago,
+    score_one_trial_ago,
+    correct_one_trial_ago,
+    time_since_last_practice,
+    learned_in_previous_session ) %>% 
+  as.matrix()
+
+
+# 1. Predict latent variable (pred_latent=TRUE) and variance
+pred <- predict(bst, data = Xtest, group_data_pred = group_test, 
+                predict_var = TRUE, pred_latent = TRUE)
+
+# pred[["fixed_effect"]]: predictions from the tree-ensemble
+# pred[["random_effect_mean"]]: predicted means of the gp_model
+# pred["random_effect_cov"]]: predicted (co-)variances of the gp_model
+
+use_data(pred, overwrite = TRUE)
+
+```
+
+
+```{r}
+
+# 2. Predict response variable (pred_latent=FALSE)
+
+pred_resp <- predict(bst, data = Xtest, group_data_pred = group_test, 
+                     predict_var = TRUE, pred_latent = FALSE)
+# pred_resp[["response_mean"]]: mean predictions of the response variable 
+#   which combines predictions from the tree ensemble and the random effects
+# pred_resp[["response_var"]]: predictive (co-)variances (if predict_var=True)
+
+use_data(pred_resp, overwrite = TRUE)
+
+
+```
+
+
+```{r}
+
+# Visualize fitted response variable
+
+plot(X[,1], y, col=rgb(0,0,0,alpha=0.1), main="Data and predicted response variable")
+
+lines(Xtest[,1], pred_resp$response_mean, col=3, lwd=3)
+
+```
+
+
+
+```{r}
+
+Metrics::rmse(test_data$proportion_correct_notes, pred_resp$response_mean)
+
+```
+
+> 0.1759122
+
+```{r}
+
+compute_r_squared(test_data$proportion_correct_notes, pred_resp$response_mean)
+
+
+```
+
+
+
+- Try gpboost again but with na.omit
+
+```{r}
+
+sing_dat_with_item_stats %>%
+  summarise(across(everything(), ~ sum(is.na(.))/length(.)))
+
+
+```
+
+```{r}
+
+# Put 3/4 of the data into the training set 
+data_split_na_omit <- initial_split(na.omit(sing_dat_with_item_stats), prop = 3/4)
+
+# Create dataframes for the two sets:
+train_data_na_omit <- training(data_split_na_omit) 
+test_data_na_omit <- testing(data_split_na_omit)
+
+```
+
+
+```{r}
+
+group_na_omit <- train_data_na_omit %>% 
+  select(user_id, item_id) %>% 
+  mutate(user_id_item_id = interaction(user_id, item_id)) %>% 
+  as.matrix()
+
+
+X_na_omit <- train_data_na_omit %>% 
+  select(avg_score,
+         no_notes,
+    no_times_practised,
+    score_two_trials_ago,
+    correct_two_trials_ago,
+    score_one_trial_ago,
+    correct_one_trial_ago,
+    time_since_last_practice,
+    learned_in_previous_session ) %>% 
+  as.matrix()
+
+
+y_na_omit <- train_data_na_omit %>% 
+  select(proportion_correct_notes) %>% 
+  as.matrix()
+
+#--------------------Training----------------
+# Define random effects model
+gp_model2 <- GPModel(group_data = group_na_omit, likelihood = "gaussian")
+# The default optimizer for covariance parameters (hyperparameters) is 
+# Nesterov-accelerated gradient descent.
+# This can be changed to, e.g., Nelder-Mead as follows:
+# set_optim_params(gp_model, params=list(optimizer_cov="nelder_mead"))
+# Use the option trace=TRUE to monitor convergence of hyperparameter estimation of the gp_model. E.g.:
+# set_optim_params(gp_model, params=list(trace=TRUE))
+
+# Specify boosting parameters
+# Note: these parameters are by no means optimal for all data sets but 
+#       need to be chosen appropriately, e.g., using 'gpb.grid.search.tune.parameters'
+
+
+params <- list(learning_rate = 0.01, 
+               max_depth = 3, 
+               num_leaves = 2^10)
+
+bst <- gpboost(data = X_na_omit, 
+               label = y_na_omit, 
+               gp_model = gp_model2, 
+               nrounds = 50, 
+               params = params, verbose = 0)
+
+summary(gp_model2) # Estimated random effects model
+
+
+use_data(gp_model2, overwrite = TRUE)
+
+
+```
+
+
+```{r}
+
+#--------------------Prediction----------------
+
+group_test_na_omit <- test_data_na_omit  %>% 
+  select(user_id, item_id) %>% 
+    mutate(user_id_item_id = interaction(user_id, item_id)) %>% 
+  as.matrix()
+
+
+Xtest_na_omit <- test_data_na_omit %>% 
+  select(avg_score,
+         no_notes,
+    no_times_practised,
+    score_two_trials_ago,
+    correct_two_trials_ago,
+    score_one_trial_ago,
+    correct_one_trial_ago,
+    time_since_last_practice,
+    learned_in_previous_session ) %>% 
+  as.matrix()
+
+
+# 1. Predict latent variable (pred_latent=TRUE) and variance
+pred_na_omit <- predict(bst, data = Xtest_na_omit, group_data_pred = group_test_na_omit, 
+                predict_var = TRUE, pred_latent = TRUE)
+
+# pred_na_omit[["fixed_effect"]]: predictions from the tree-ensemble
+# pred_na_omit[["random_effect_mean"]]: predicted means of the gp_model
+# pred_na_omit["random_effect_cov"]]: predicted (co-)variances of the gp_model
+
+use_data(pred_na_omit, overwrite = TRUE)
+
+```
+
+
+```{r}
+
+# 2. Predict response variable (pred_latent=FALSE)
+
+pred_resp_na_omit <- predict(bst, data = Xtest_na_omit, group_data_pred = group_test_na_omit, 
+                     predict_var = TRUE, pred_latent = FALSE)
+# pred_resp_na_omit[["response_mean"]]: mean predictions of the response variable 
+#   which combines predictions from the tree ensemble and the random effects
+# pred_resp_na_omit[["response_var"]]: predictive (co-)variances (if predict_var=True)
+
+use_data(pred_resp_na_omit, overwrite = TRUE)
+
+
+```
+
+
+```{r}
+
+# Visualize fitted response variable
+
+plot(X[,1], y, col=rgb(0,0,0,alpha=0.1), main="Data and predicted response variable")
+
+lines(Xtest_na_omit[,1], pred_resp_na_omit$response_mean, col=3, lwd=3)
+
+```
+
+
+
+```{r}
+
+Metrics::rmse(test_data_na_omit$proportion_correct_notes, pred_resp_na_omit$response_mean)
+
+```
+
+> 0.2278695
+
+```{r}
+
+compute_r_squared(test_data_na_omit$proportion_correct_notes, pred_resp_na_omit$response_mean)
+
+
+```
+
 
