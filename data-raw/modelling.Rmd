@@ -617,15 +617,68 @@ use_data(des_res, overwrite = TRUE)
 
 ```{r}
 
-min_model_test_fit <- lmerTest::lmer(proportion_correct_notes ~ 
-                          avg_score + (1|user_id) + (1|item_id) + (1|user_id:item_id), data = test_data)
+min_model_train_fit <- lmerTest::lmer(proportion_correct_notes ~ 
+                          avg_score + (1|user_id) + (1|item_id) + (1|user_id:item_id), data = train_data)
 
 ```
 
 
 ```{r}
 
-MuMIn::r.squaredGLMM(min_model_test_fit)
+test_data_na_omited <- test_data %>% na.omit
+
+test_preds <- predict(min_model_train_fit, newdata = test_data_na_omited, allow.new.levels = TRUE)
+
+
+```
+
+
+
+```{r}
+
+compute_r_squared(test_data_na_omited$proportion_correct_notes, test_preds)
+
+```
+
+
+```{r}
+
+
+Metrics::rmse(test_data_na_omited$proportion_correct_notes, test_preds)
+
+
+
+```
+
+
+```{r}
+
+MuMIn::r.squaredGLMM(min_model_train_fit)
+
+```
+
+
+```{r}
+
+final_lm <- lmerTest::lmer(proportion_correct_notes ~ 
+                          avg_score + (1|user_id) + (1|item_id) + (1|user_id:item_id), 
+                          data = sing_dat_with_item_stats)
+
+
+```
+
+
+```{r}
+
+summary(final_lm)
+
+```
+
+
+```{r}
+
+MuMIn::r.squaredGLMM(final_lm)
+
 
 ```
 
